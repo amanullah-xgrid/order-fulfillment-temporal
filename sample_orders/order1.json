@@ -1,6 +1,6 @@
 {
   "order_id": "ORD-001",
   "items": [
-    { "sku": "WIDGET-19", "qty": 2 }
+    { "sku": "WIDGET-19", "qty": 5 }
   ]
 }

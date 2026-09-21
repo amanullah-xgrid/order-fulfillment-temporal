@@ -4,6 +4,7 @@ from typing import List
 import uuid
 
 app = FastAPI()
+
 class OrderItem(BaseModel):
     sku: str
     qty: int
@@ -11,6 +12,8 @@ class OrderItem(BaseModel):
 class ReserveRequest(BaseModel):
     order_id: str
     items: List[OrderItem]
+
+
 inventory = {
     "WIDGET-1":  {"total": 20, "reserved": 18},  # Available: 2
     "WIDGET-2":  {"total": 5,  "reserved": 0},   # Available: 5
@@ -33,8 +36,15 @@ inventory = {
     "WIDGET-19": {"total": 22, "reserved": 0},   # Available: 22
     "WIDGET-20": {"total": 16, "reserved": 16},  # Available: 0
 }
+
+processed_orders = {}
+
+
 @app.post("/inventory/reserve")
 def reserve(req: ReserveRequest):
+    if req.order_id in processed_orders:
+        return processed_orders[req.order_id]
+
     unavailable = []
     for item in req.items:
         stock = inventory.get(item.sku)
@@ -43,9 +53,13 @@ def reserve(req: ReserveRequest):
             unavailable.append(item.sku)
 
     if unavailable:
-        return {"reservation_id": None, "status": "OUT_OF_STOCK", "unavailable_skus": unavailable}
+        result = {"reservation_id": None, "status": "OUT_OF_STOCK", "unavailable_skus": unavailable}
+        processed_orders[req.order_id] = result
+        return result
 
     for item in req.items:
         inventory[item.sku]["reserved"] += item.qty
 
-    return {"reservation_id": str(uuid.uuid4()), "status": "RESERVED", "unavailable_skus": []}
+    result = {"reservation_id": str(uuid.uuid4()), "status": "RESERVED", "unavailable_skus": []}
+    processed_orders[req.order_id] = result
+    return result
