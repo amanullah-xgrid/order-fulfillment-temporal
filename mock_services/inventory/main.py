@@ -37,7 +37,20 @@ inventory = {
     "WIDGET-20": {"total": 16, "reserved": 16},  # Available: 0
 }
 
+@app.get("/inventory/status/{sku}")
+def status(sku: str):
+    stock = inventory.get(sku)
+    if stock is None:
+        return {"error": "SKU not found"}
+    return {
+        "sku": sku,
+        "total": stock["total"],
+        "reserved": stock["reserved"],
+        "available": stock["total"] - stock["reserved"]
+    }
+
 processed_orders = {}
+reservations = {}
 
 
 @app.post("/inventory/reserve")
@@ -60,6 +73,25 @@ def reserve(req: ReserveRequest):
     for item in req.items:
         inventory[item.sku]["reserved"] += item.qty
 
-    result = {"reservation_id": str(uuid.uuid4()), "status": "RESERVED", "unavailable_skus": []}
+    reservation_id = str(uuid.uuid4())
+    reservations[reservation_id] = [{"sku": item.sku, "qty": item.qty} for item in req.items]
+
+    result = {"reservation_id": reservation_id, "status": "RESERVED", "unavailable_skus": []}
     processed_orders[req.order_id] = result
     return result
+
+class ReleaseRequest(BaseModel):
+    reservation_id: str
+
+
+@app.post("/inventory/release")
+def release(req: ReleaseRequest):
+    items = reservations.get(req.reservation_id)
+    if items is None:
+        return {"status": "NOT_FOUND"}
+
+    for item in items:
+        inventory[item["sku"]]["reserved"] -= item["qty"]
+
+    del reservations[req.reservation_id]
+    return {"status": "RELEASED"}    
