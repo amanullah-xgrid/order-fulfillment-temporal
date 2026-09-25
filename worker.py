@@ -3,7 +3,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from workflows.order_fulfillment_workflow import OrderFulfillmentWorkflow
-from activities.order_activities import validate_order, reserve_inventory
+from activities.order_activities import validate_order, reserve_inventory, charge_payment, release_inventory
 
 async def main():
     client = await Client.connect("localhost:7233")
@@ -12,7 +12,7 @@ async def main():
         client,
         task_queue="order-fulfillment-tq",
         workflows=[OrderFulfillmentWorkflow],
-        activities=[validate_order, reserve_inventory],
+        activities=[validate_order, reserve_inventory, charge_payment, release_inventory],
     )
 
     await worker.run()
