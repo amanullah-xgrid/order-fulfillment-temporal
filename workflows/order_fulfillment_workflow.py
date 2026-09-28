@@ -11,6 +11,7 @@ class OrderFulfillmentWorkflow:
         self.payment_confirmed = False
         self.payment_failed = False
         self.cancel_requested = False
+        self.compensations = []
 
     @workflow.signal
     def payment_webhook(self, status: str):
@@ -34,39 +35,50 @@ class OrderFulfillmentWorkflow:
         else:
             return "AWAITING_PAYMENT_CONFIRMATION"
 
+    async def _compensate(self):
+        while self.compensations:
+            fn, arg = self.compensations.pop()
+            await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
+
     @workflow.run
     async def run(self, order: Order) -> str:
-        await workflow.execute_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5))
-        result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
-
-        if result.status != "RESERVED":
-            return "OUT_OF_STOCK"
-
-        payment = await workflow.execute_activity(
-            charge_payment,
-            order,
-            start_to_close_timeout=timedelta(seconds=15),
-            retry_policy=RetryPolicy(
-                maximum_attempts=3,
-                initial_interval=timedelta(seconds=2),
-                backoff_coefficient=2.0
-            )
-        )
-
         try:
-            await workflow.wait_condition(
-                lambda: self.payment_confirmed or self.payment_failed or self.cancel_requested,
-                timeout=timedelta(seconds=60)  # shortened for dev; doc says 2h in production
-            )
-        except TimeoutError:
-            await workflow.execute_activity(release_inventory, result.reservation_id, start_to_close_timeout=timedelta(seconds=5))
-            return "PAYMENT_TIMEOUT"
+            await workflow.execute_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5))
+            result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
 
-        if self.cancel_requested:
-            await workflow.execute_activity(release_inventory, result.reservation_id, start_to_close_timeout=timedelta(seconds=5))
-            return "CANCELLED"
-        elif self.payment_failed:
-            await workflow.execute_activity(release_inventory, result.reservation_id, start_to_close_timeout=timedelta(seconds=5))
-            return "PAYMENT_FAILED"
-        else:
-            return "PAID"
+            if result.status != "RESERVED":
+                return "OUT_OF_STOCK"
+
+            self.compensations.append((release_inventory, result.reservation_id))
+
+            payment = await workflow.execute_activity(
+                charge_payment,
+                order,
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=2),
+                    backoff_coefficient=2.0
+                )
+            )
+
+            try:
+                await workflow.wait_condition(
+                    lambda: self.payment_confirmed or self.payment_failed or self.cancel_requested,
+                    timeout=timedelta(seconds=60)  # shortened for dev; doc says 2h in production
+                )
+            except TimeoutError:
+                await self._compensate()
+                return "PAYMENT_TIMEOUT"
+
+            if self.cancel_requested:
+                await self._compensate()
+                return "CANCELLED"
+            elif self.payment_failed:
+                await self._compensate()
+                return "PAYMENT_FAILED"
+            else:
+                return "PAID"
+        except Exception:
+            await self._compensate()
+            raise
