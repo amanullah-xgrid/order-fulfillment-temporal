@@ -2,6 +2,45 @@ from temporalio import activity
 from dataclasses import dataclass
 from typing import List
 import httpx
+import time
+import json
+import logging
+from functools import wraps
+
+logger = logging.getLogger(__name__)
+
+def logged_activity(fn):
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        info = activity.info()
+        start = time.monotonic()
+        logger.info(json.dumps({
+            "order_id": info.workflow_id,
+            "activity_name": info.activity_type,
+            "attempt": info.attempt,
+            "event": "start"
+        }))
+        try:
+            result = await fn(*args, **kwargs)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(json.dumps({
+                "order_id": info.workflow_id,
+                "activity_name": info.activity_type,
+                "duration_ms": round(duration_ms, 1),
+                "outcome": "success"
+            }))
+            return result
+        except Exception:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.warning(json.dumps({
+                "order_id": info.workflow_id,
+                "activity_name": info.activity_type,
+                "attempt": info.attempt,
+                "duration_ms": round(duration_ms, 1),
+                "outcome": "attempt_failed"
+            }))
+            raise
+    return wrapper
 
 @dataclass
 class OrderItem:
@@ -32,6 +71,7 @@ class RefundResult:
     payment_id: str
     status: str
 @activity.defn
+@logged_activity
 async def validate_order(order: Order) -> bool:
     if not order.items:
         raise ValueError(f"Order {order.order_id} has no items")
@@ -41,6 +81,7 @@ async def validate_order(order: Order) -> bool:
     return True
     
 @activity.defn
+@logged_activity
 async def reserve_inventory(order: Order) -> ReservationResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -58,8 +99,8 @@ async def reserve_inventory(order: Order) -> ReservationResult:
     )
 
 @activity.defn
+@logged_activity
 async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
-    activity.logger.info(f"charge_payment called with idempotency_key={idempotency_key}")
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://localhost:8002/payments/charge",
@@ -76,6 +117,7 @@ async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
     )
     
 @activity.defn
+@logged_activity
 async def release_inventory(reservation_id: str) -> ReleaseResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -86,6 +128,7 @@ async def release_inventory(reservation_id: str) -> ReleaseResult:
     return ReleaseResult(status=data["status"])
 
 @activity.defn
+@logged_activity
 async def refund_payment(payment_id: str) -> RefundResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
