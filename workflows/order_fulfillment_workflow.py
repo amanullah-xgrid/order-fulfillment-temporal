@@ -1,9 +1,10 @@
+#import asyncio  # uncomment to reliably demo the CONFIRMED+cancel race
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 
 with workflow.unsafe.imports_passed_through():
-    from activities.order_activities import Order, validate_order, reserve_inventory, charge_payment, release_inventory
+    from activities.order_activities import Order, validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment
 
 @workflow.defn
 class OrderFulfillmentWorkflow:
@@ -51,9 +52,11 @@ class OrderFulfillmentWorkflow:
 
             self.compensations.append((release_inventory, result.reservation_id))
 
+            idempotency_key = str(workflow.uuid4())
+
             payment = await workflow.execute_activity(
                 charge_payment,
-                order,
+                args=[order, idempotency_key],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
@@ -61,6 +64,8 @@ class OrderFulfillmentWorkflow:
                     backoff_coefficient=2.0
                 )
             )
+
+            self.compensations.append((refund_payment, payment.payment_id))
 
             try:
                 await workflow.wait_condition(
@@ -70,6 +75,8 @@ class OrderFulfillmentWorkflow:
             except TimeoutError:
                 await self._compensate()
                 return "PAYMENT_TIMEOUT"
+
+            #await asyncio.sleep(15)  # uncomment to reliably demo the CONFIRMED+cancel race
 
             if self.cancel_requested:
                 await self._compensate()

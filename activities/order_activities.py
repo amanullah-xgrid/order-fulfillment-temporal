@@ -27,7 +27,10 @@ class PaymentResult:
 @dataclass
 class ReleaseResult:
     status: str       
-
+@dataclass
+class RefundResult:
+    payment_id: str
+    status: str
 @activity.defn
 async def validate_order(order: Order) -> bool:
     if not order.items:
@@ -55,14 +58,15 @@ async def reserve_inventory(order: Order) -> ReservationResult:
     )
 
 @activity.defn
-async def charge_payment(order: Order) -> PaymentResult:
+async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
+    activity.logger.info(f"charge_payment called with idempotency_key={idempotency_key}")
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://localhost:8002/payments/charge",
             json={
                 "order_id": order.order_id,
                 "amount": 49.99,
-                "idempotency_key": order.order_id
+                "idempotency_key": idempotency_key
             }
         )
     data = response.json()
@@ -79,4 +83,18 @@ async def release_inventory(reservation_id: str) -> ReleaseResult:
             json={"reservation_id": reservation_id}
         )
     data = response.json()
-    return ReleaseResult(status=data["status"])    
+    return ReleaseResult(status=data["status"])
+
+@activity.defn
+async def refund_payment(payment_id: str) -> RefundResult:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8002/payments/refund",
+            json={"payment_id": payment_id}
+        )
+    response.raise_for_status()
+    data = response.json()
+    return RefundResult(
+        payment_id=data["payment_id"],
+        status=data["status"]
+    )    
