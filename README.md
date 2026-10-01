@@ -115,3 +115,79 @@ See `screenshots/week2/` for Event History captures of each, including a capture
 
 ### Idempotency
 `charge_payment`'s underlying Payment service call is idempotent from the start, keyed on `idempotency_key` (currently set to `order_id`; true key generation per attempt is Week 3 scope). This is the same pattern applied to `reserve_inventory` in the Week 1 fix.
+
+
+## Week 3 — Resilience: Saga, Idempotency, Testing, Reconciliation
+
+### What it does
+This week adds no new stage to the order; it makes the stages already built trustworthy enough to run unattended. Every failure path after inventory is reserved now unwinds whatever already happened: `OrderFulfillmentWorkflow` tracks a stack of `(activity, argument)` undo pairs as each step succeeds (reserve inventory, charge payment), and a single `_compensate()` helper pops and runs them in reverse order on any failure, whether that failure is a timeout, a cancellation, a payment decline, or `charge_payment` exhausting all its retries. Payment is genuinely idempotent: a fresh `workflow.uuid4()`-generated key is created once per Workflow execution and reused across every retry of that one `charge_payment` call, so Temporal's automatic retries can never double-charge, while two separate orders always get distinct keys. Every Activity emits structured JSON logs at start and completion via a shared `@logged_activity` decorator, and failed attempts log at WARNING. A nightly `ReconciliationWorkflow`, run on a Temporal Schedule, finds orders stuck in `AWAITING_PAYMENT_CONFIRMATION` past a threshold (using a `get_payment_wait_started_at` Query) and signals `cancel_order` on them, reusing the exact same compensation path a real cancellation would use.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as submit_order.py
+    participant Worker as worker.py
+    participant Pay as Payment API
+    participant Inv as Inventory API
+    participant Sched as nightly-reconciliation Schedule
+    participant Recon as ReconciliationWorkflow
+
+    CLI->>Worker: start_workflow(OrderFulfillmentWorkflow)
+    Worker->>Inv: reserve_inventory
+    Note over Worker: push (release_inventory, reservation_id) onto compensations
+    Worker->>Pay: charge_payment(idempotency_key, retries up to 3x)
+    Note over Worker: push (refund_payment, payment_id) onto compensations
+    Note over Worker: wait_condition(...) — order now AWAITING_PAYMENT_CONFIRMATION
+
+    alt payment confirmed
+        Worker->>CLI: PAID
+    else any failure (timeout / cancel / declined / charge exhausted)
+        Worker->>Worker: _compensate() — pop and undo in reverse
+        Worker->>Pay: refund_payment (if charged)
+        Worker->>Inv: release_inventory
+        Worker->>CLI: failure result
+    end
+
+    Sched->>Recon: fires nightly (or triggered on demand)
+    Recon->>Worker: get_order_status / get_payment_wait_started_at (Query)
+    Recon->>Worker: cancel_order (signal, if stuck past threshold)
+```
+
+### How to run it
+1. `temporal server start-dev`
+2. `uvicorn mock_services.inventory.main:app --reload --port 8001`
+3. `uvicorn mock_services.payment.main:app --reload --port 8002`
+4. `python worker.py`
+5. `python submit_order.py --order sample_orders/orderXXX.json`
+6. To create the nightly Schedule once: `python setup_schedule.py`
+7. To trigger reconciliation manually at any time: `python run_reconciliation.py --threshold-seconds 2`
+
+### Saga compensation, demonstrated
+| Scenario | Result | Inventory released | Payment refunded |
+|---|---|---|---|
+| Payment confirmed | PAID | No (nothing to undo) | No |
+| Payment declined via webhook | PAYMENT_FAILED | Yes | No (never confirmed) |
+| Customer cancels mid-wait | CANCELLED | Yes | No (never confirmed) |
+| No webhook, timeout | PAYMENT_TIMEOUT | Yes | No (never confirmed) |
+| `charge_payment` fails all 3 attempts | Workflow fails (raised) | Yes | No (never charged) |
+| CONFIRMED and cancel race (same instant) | CANCELLED, deterministic | Yes | Yes (money refunded, since payment had genuinely confirmed) |
+
+See `screenshots/week3/` for Event History captures of each, including the failed-charge-then-release case and the confirm/cancel race showing both `refund_payment` and `release_inventory` firing in the correct order.
+
+### Structured logging
+Every Activity is wrapped with a `@logged_activity` decorator that emits a JSON line on start (`order_id`, `activity_name`, `attempt`) and on completion (`duration_ms`, `outcome`: `success` or `attempt_failed`). Failed attempts log at WARNING; `order_id` is read from `activity.info().workflow_id` rather than threaded through every Activity's arguments, since every Workflow ID is already `order-<order_id>`.
+
+### Tests
+`tests/test_order_fulfillment.py`, 8 tests, run with `python -m pytest tests/test_order_fulfillment.py -v`, using `temporalio.testing.WorkflowEnvironment.start_time_skipping()` so the 60-second wait_condition timeout resolves in under a second rather than actually waiting:
+- Reserved → paid (happy path)
+- Out of stock
+- `charge_payment` fails twice then succeeds; asserts the mock Payment API's idempotency key stayed identical across all 3 attempts
+- `charge_payment` fails all 3 attempts; asserts inventory is released and no refund is attempted
+- Payment declined via webhook
+- Payment timeout (real time-skipping, no signal sent at all)
+- Confirm/cancel race via `asyncio.gather`; asserts the outcome is deterministic (CANCELLED) and both release and refund fire exactly once, not twice
+- Idempotency key differs across two separate orders, proving uniqueness isn't just "stays the same," it's scoped correctly per order
+
+### Nightly reconciliation Schedule
+A Temporal Schedule (`nightly-reconciliation`, created by `setup_schedule.py`) runs `ReconciliationWorkflow` at 2am. It lists running `OrderFulfillmentWorkflow` executions, Queries each one's status and payment-wait start time, and signals `cancel_order` on any still `AWAITING_PAYMENT_CONFIRMATION` past the threshold, letting that order's own compensation logic clean it up. Pausing and manually triggering the Schedule were demonstrated directly from the Web UI's Schedules page, see `screenshots/week3/`.
