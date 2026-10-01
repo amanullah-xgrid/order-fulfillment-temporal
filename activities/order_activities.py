@@ -1,3 +1,4 @@
+from temporalio.client import Client
 from temporalio import activity
 from dataclasses import dataclass
 from typing import List
@@ -6,6 +7,7 @@ import time
 import json
 import logging
 from functools import wraps
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +69,15 @@ class PaymentResult:
 class ReleaseResult:
     status: str       
 @dataclass
+
 class RefundResult:
     payment_id: str
     status: str
+
+@dataclass
+class ReconciliationResult:
+    cancelled_order_ids: List[str]
+
 @activity.defn
 @logged_activity
 async def validate_order(order: Order) -> bool:
@@ -140,4 +148,31 @@ async def refund_payment(payment_id: str) -> RefundResult:
     return RefundResult(
         payment_id=data["payment_id"],
         status=data["status"]
-    )    
+    ) 
+
+@activity.defn
+async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
+    client = await Client.connect("localhost:7233")
+
+    cancelled = []
+    async for wf in client.list_workflows(
+        query="WorkflowType='OrderFulfillmentWorkflow' AND ExecutionStatus='Running'"
+    ):
+        handle = client.get_workflow_handle(wf.id)
+        status = await handle.query("get_order_status")
+
+        if status != "AWAITING_PAYMENT_CONFIRMATION":
+            continue
+
+        started_at_str = await handle.query("get_payment_wait_started_at")
+        if started_at_str is None:
+            continue
+
+        started_at = datetime.fromisoformat(started_at_str)
+        waited_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+
+        if waited_seconds >= threshold_seconds:
+            await handle.signal("cancel_order")
+            cancelled.append(wf.id)
+
+    return ReconciliationResult(cancelled_order_ids=cancelled)

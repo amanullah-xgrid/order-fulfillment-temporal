@@ -4,7 +4,8 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from workflows.order_fulfillment_workflow import OrderFulfillmentWorkflow
-from activities.order_activities import validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment
+from workflows.reconciliation_workflow import ReconciliationWorkflow
+from activities.order_activities import validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment, scan_and_cancel_stuck_orders
 
 logging.basicConfig(level=logging.INFO)
 
@@ -14,8 +15,8 @@ async def main():
     worker = Worker(
         client,
         task_queue="order-fulfillment-tq",
-        workflows=[OrderFulfillmentWorkflow],
-        activities=[validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment],
+        workflows=[OrderFulfillmentWorkflow, ReconciliationWorkflow],
+        activities=[validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment, scan_and_cancel_stuck_orders],
     )
 
     await worker.run()

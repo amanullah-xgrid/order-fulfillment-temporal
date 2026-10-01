@@ -13,6 +13,7 @@ class OrderFulfillmentWorkflow:
         self.payment_failed = False
         self.cancel_requested = False
         self.compensations = []
+        self.payment_wait_started_at = None
 
     @workflow.signal
     def payment_webhook(self, status: str):
@@ -35,6 +36,9 @@ class OrderFulfillmentWorkflow:
             return "CANCELLED"
         else:
             return "AWAITING_PAYMENT_CONFIRMATION"
+    @workflow.query
+    def get_payment_wait_started_at(self) -> str | None:
+        return self.payment_wait_started_at.isoformat() if self.payment_wait_started_at else None        
 
     async def _compensate(self):
         while self.compensations:
@@ -66,6 +70,8 @@ class OrderFulfillmentWorkflow:
             )
 
             self.compensations.append((refund_payment, payment.payment_id))
+
+            self.payment_wait_started_at = workflow.now()
 
             try:
                 await workflow.wait_condition(
