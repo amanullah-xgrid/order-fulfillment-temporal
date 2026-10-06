@@ -1,3 +1,4 @@
+from temporalio.exceptions import ApplicationError
 from temporalio.client import Client
 from temporalio import activity
 from dataclasses import dataclass
@@ -143,12 +144,14 @@ async def refund_payment(payment_id: str) -> RefundResult:
             "http://localhost:8002/payments/refund",
             json={"payment_id": payment_id}
         )
+    if response.status_code == 404:
+        raise ApplicationError("Payment not found, cannot refund", non_retryable=True)
     response.raise_for_status()
     data = response.json()
     return RefundResult(
         payment_id=data["payment_id"],
         status=data["status"]
-    ) 
+    )
 
 @activity.defn
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:

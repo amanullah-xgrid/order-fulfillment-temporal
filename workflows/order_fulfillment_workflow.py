@@ -1,4 +1,4 @@
-#import asyncio  # uncomment to reliably demo the CONFIRMED+cancel race
+#import asyncio  #uncomment to reliably demo the CONFIRMED+cancel race
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta
@@ -48,7 +48,7 @@ class OrderFulfillmentWorkflow:
     @workflow.run
     async def run(self, order: Order) -> str:
         try:
-            await workflow.execute_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5))
+            await workflow.execute_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5), retry_policy=RetryPolicy(non_retryable_error_types=["ValueError"]))
             result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
 
             if result.status != "RESERVED":

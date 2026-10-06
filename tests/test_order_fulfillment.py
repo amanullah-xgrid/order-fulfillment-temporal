@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 from datetime import timedelta
+from temporalio.exceptions import ApplicationError
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -150,6 +151,7 @@ async def test_charge_payment_retries_then_succeeds():
 
 release_calls = []
 refund_calls = []
+refund_attempts = []
 
 @activity.defn(name="release_inventory")
 async def counting_fake_release_inventory(reservation_id: str) -> ReleaseResult:
@@ -161,6 +163,11 @@ async def counting_fake_release_inventory(reservation_id: str) -> ReleaseResult:
 async def counting_fake_refund_payment(payment_id: str) -> RefundResult:
     refund_calls.append(payment_id)
     return RefundResult(payment_id=payment_id, status="REFUNDED")
+
+@activity.defn(name="refund_payment")
+async def fake_refund_payment_not_found(payment_id: str) -> RefundResult:
+    refund_attempts.append(payment_id)
+    raise ApplicationError("Payment not found, cannot refund", non_retryable=True)
 
 @pytest.mark.asyncio
 async def test_cancel_and_confirm_race():
@@ -203,6 +210,7 @@ def reset_call_tracking():
     release_calls.clear()
     refund_calls.clear()
     recorded_keys.clear()
+    refund_attempts.clear()
 
 @pytest.mark.asyncio
 async def test_payment_timeout_flow():
@@ -349,4 +357,35 @@ async def test_idempotency_key_differs_across_orders():
             assert result_a == "PAID"
             assert result_b == "PAID"
             assert len(recorded_keys) == 2
-            assert len(set(recorded_keys)) == 2                
+            assert len(set(recorded_keys)) == 2  
+
+@pytest.mark.asyncio
+async def test_refund_not_found_fails_permanently():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                fake_refund_payment_not_found,
+            ],
+        ):
+            order = Order(order_id="TEST-010", items=[OrderItem(sku="WIDGET-1", qty=1)])
+
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-010",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("cancel_order")
+
+            with pytest.raises(Exception):
+                await handle.result()
+
+            assert len(refund_attempts) == 1              
