@@ -79,6 +79,29 @@ class RefundResult:
 class ReconciliationResult:
     cancelled_order_ids: List[str]
 
+@dataclass
+class ShipmentResult:
+    package_id: str
+
+def split_into_packages(order, max_units_per_package: int = 2):
+    packages = []
+    current_package = []
+    current_units = 0
+
+    for item in order.items:
+        if current_package and current_units + item.qty > max_units_per_package:
+            packages.append(current_package)
+            current_package = []
+            current_units = 0
+
+        current_package.append(item)
+        current_units += item.qty
+
+    if current_package:
+        packages.append(current_package)
+
+    return packages    
+
 @activity.defn
 @logged_activity
 async def validate_order(order: Order) -> bool:
@@ -179,3 +202,19 @@ async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> Reconciliation
             cancelled.append(wf.id)
 
     return ReconciliationResult(cancelled_order_ids=cancelled)
+
+@activity.defn
+@logged_activity
+async def create_shipment(package: List[OrderItem], idempotency_key: str) -> ShipmentResult:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8003/shipping/create",
+            json={
+                "items": [{"sku": item.sku, "qty": item.qty} for item in package],
+                "idempotency_key": idempotency_key
+            }
+        )
+    data = response.json()
+    return ShipmentResult(
+        package_id=data["package_id"]
+    )
