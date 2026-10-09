@@ -83,6 +83,10 @@ class ReconciliationResult:
 class ShipmentResult:
     package_id: str
 
+@dataclass
+class RestockResult:
+    status: str
+
 def split_into_packages(order, max_units_per_package: int = 2):
     packages = []
     current_package = []
@@ -218,3 +222,17 @@ async def create_shipment(package: List[OrderItem], idempotency_key: str) -> Shi
     return ShipmentResult(
         package_id=data["package_id"]
     )
+
+@activity.defn
+@logged_activity
+async def restock_inventory(reservation_id: str) -> RestockResult:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8001/inventory/restock",
+            json={"reservation_id": reservation_id}
+        )
+    if response.status_code == 404:
+        raise ApplicationError("Reservation not found, cannot restock", non_retryable=True)
+    response.raise_for_status()
+    data = response.json()
+    return RestockResult(status=data["status"])

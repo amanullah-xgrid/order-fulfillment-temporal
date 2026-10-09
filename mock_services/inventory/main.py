@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 import uuid
@@ -12,6 +12,9 @@ class OrderItem(BaseModel):
 class ReserveRequest(BaseModel):
     order_id: str
     items: List[OrderItem]
+
+class RestockRequest(BaseModel):
+    reservation_id: str
 
 
 inventory = {
@@ -51,6 +54,7 @@ def status(sku: str):
 
 processed_orders = {}
 reservations = {}
+restocked = {}
 
 
 @app.post("/inventory/reserve")
@@ -95,3 +99,20 @@ def release(req: ReleaseRequest):
 
     del reservations[req.reservation_id]
     return {"status": "RELEASED"}    
+
+@app.post("/inventory/restock")
+def restock(req: RestockRequest):
+    if req.reservation_id in restocked:
+        return restocked[req.reservation_id]
+
+    items = reservations.get(req.reservation_id)
+    if items is None:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    for item in items:
+        inventory[item["sku"]]["reserved"] -= item["qty"]
+
+    del reservations[req.reservation_id]
+    result = {"status": "RESTOCKED"}
+    restocked[req.reservation_id] = result
+    return result

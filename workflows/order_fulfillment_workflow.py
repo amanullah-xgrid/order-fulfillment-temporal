@@ -6,7 +6,7 @@ from datetime import timedelta
 with workflow.unsafe.imports_passed_through():
     from activities.order_activities import (
         Order, validate_order, reserve_inventory, charge_payment,
-        release_inventory, refund_payment, split_into_packages,
+        release_inventory, refund_payment, split_into_packages, restock_inventory
     )
     from workflows.shipment_workflow import ShipmentWorkflow
 
@@ -18,6 +18,8 @@ class OrderFulfillmentWorkflow:
         self.cancel_requested = False
         self.compensations = []
         self.payment_wait_started_at = None
+        self.return_requested = False
+        self.return_window_open = False
 
     @workflow.signal
     def payment_webhook(self, status: str):
@@ -29,6 +31,11 @@ class OrderFulfillmentWorkflow:
     @workflow.signal
     def cancel_order(self):
         self.cancel_requested = True
+
+    @workflow.signal
+    def request_return(self):
+        if self.return_window_open:
+            self.return_requested = True
 
     @workflow.query
     def get_order_status(self) -> str:
@@ -49,6 +56,10 @@ class OrderFulfillmentWorkflow:
         while self.compensations:
             fn, arg = self.compensations.pop()
             await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
+
+    @workflow.query
+    def is_return_window_open(self) -> bool:
+        return self.return_window_open        
 
     @workflow.run
     async def run(self, order: Order) -> str:
@@ -112,6 +123,7 @@ class OrderFulfillmentWorkflow:
                     id=f"{workflow.info().workflow_id}-shipment-{len(shipment_handles)}",
                 )
                 shipment_handles.append(handle)
+                self.compensations.clear()  # point of no return: goods have left the warehouse
 
             results = await asyncio.gather(*shipment_handles, return_exceptions=True)
 
@@ -126,9 +138,26 @@ class OrderFulfillmentWorkflow:
                     payment.payment_id,
                     start_to_close_timeout=timedelta(seconds=5),
                 )
+                if lost_count == len(results):
+                    return "ALL_LOST"
                 return "PARTIALLY_LOST"
 
-            return "COMPLETED"
+            self.return_window_open = True
+            try:
+                await workflow.wait_condition(
+                    lambda: self.return_requested,
+                    timeout=timedelta(seconds=60),  # shortened for dev; doc says 30 days in production
+                )
+            except TimeoutError:
+                return "COMPLETED"
+
+            await workflow.execute_activity(
+                refund_payment, payment.payment_id, start_to_close_timeout=timedelta(seconds=5)
+            )
+            await workflow.execute_activity(
+                restock_inventory, result.reservation_id, start_to_close_timeout=timedelta(seconds=5)
+            )
+            return "RETURNED"
         except Exception:
             await self._compensate()
             raise

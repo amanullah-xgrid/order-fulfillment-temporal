@@ -8,7 +8,7 @@ from workflows.reconciliation_workflow import ReconciliationWorkflow
 from workflows.shipment_workflow import ShipmentWorkflow
 from activities.order_activities import (
     validate_order, reserve_inventory, charge_payment, release_inventory,
-    refund_payment, scan_and_cancel_stuck_orders, create_shipment,
+    refund_payment, scan_and_cancel_stuck_orders, create_shipment, restock_inventory
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +22,7 @@ async def main():
         workflows=[OrderFulfillmentWorkflow, ReconciliationWorkflow, ShipmentWorkflow],
         activities=[
             validate_order, reserve_inventory, charge_payment, release_inventory,
-            refund_payment, scan_and_cancel_stuck_orders, create_shipment,
+            refund_payment, scan_and_cancel_stuck_orders, create_shipment, restock_inventory
         ],
     )
 
