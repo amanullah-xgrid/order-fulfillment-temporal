@@ -5,11 +5,14 @@ from temporalio.exceptions import ApplicationError
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
+from typing import List
+from temporalio.service import RPCError
+from workflows.shipment_workflow import ShipmentWorkflow
 
 from workflows.order_fulfillment_workflow import OrderFulfillmentWorkflow
 from activities.order_activities import (
     Order, OrderItem, validate_order,
-    ReservationResult, PaymentResult, ReleaseResult, RefundResult,
+    ReservationResult, PaymentResult, ReleaseResult, RefundResult, ShipmentResult, RestockResult
 )
 
 
@@ -41,18 +44,19 @@ async def fake_refund_payment(payment_id: str) -> RefundResult:
 
 
 @pytest.mark.asyncio
-async def test_reserved_and_paid_flow():
+async def test_paid_delivered_and_completed():
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test-tq",
-            workflows=[OrderFulfillmentWorkflow],
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
             activities=[
                 validate_order,
                 fake_reserve_inventory_success,
                 fake_charge_payment_success,
                 fake_release_inventory,
                 fake_refund_payment,
+                fake_create_shipment,
             ],
         ):
             order = Order(order_id="TEST-001", items=[OrderItem(sku="WIDGET-1", qty=1)])
@@ -65,9 +69,10 @@ async def test_reserved_and_paid_flow():
             )
 
             await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-001-shipment-0", "mark_delivered")
 
             result = await handle.result()
-            assert result == "PAID"
+            assert result == "COMPLETED"
 
 @activity.defn(name="reserve_inventory")
 async def fake_reserve_inventory_out_of_stock(order: Order) -> ReservationResult:
@@ -124,13 +129,14 @@ async def test_charge_payment_retries_then_succeeds():
         async with Worker(
             env.client,
             task_queue="test-tq",
-            workflows=[OrderFulfillmentWorkflow],
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
             activities=[
                 validate_order,
                 fake_reserve_inventory_success,
                 fake_charge_payment_fails_twice,
                 fake_release_inventory,
                 fake_refund_payment,
+                fake_create_shipment,
             ],
         ):
             order = Order(order_id="TEST-003", items=[OrderItem(sku="WIDGET-1", qty=1)])
@@ -143,9 +149,10 @@ async def test_charge_payment_retries_then_succeeds():
             )
 
             await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-003-shipment-0", "mark_delivered")
 
             result = await handle.result()
-            assert result == "PAID"
+            assert result == "COMPLETED"
             assert len(charge_endpoint_hits) == 3
             assert len(set(charge_endpoint_hits)) == 1
 
@@ -168,6 +175,76 @@ async def counting_fake_refund_payment(payment_id: str) -> RefundResult:
 async def fake_refund_payment_not_found(payment_id: str) -> RefundResult:
     refund_attempts.append(payment_id)
     raise ApplicationError("Payment not found, cannot refund", non_retryable=True)
+
+restock_calls = []
+
+@activity.defn(name="create_shipment")
+async def fake_create_shipment(package: List[OrderItem], idempotency_key: str) -> ShipmentResult:
+    return ShipmentResult(package_id=f"fake-package-{idempotency_key}")
+
+
+@activity.defn(name="restock_inventory")
+async def counting_fake_restock_inventory(reservation_id: str) -> RestockResult:
+    restock_calls.append(reservation_id)
+    return RestockResult(status="RESTOCKED") 
+
+async def signal_when_started(client, workflow_id, signal_name):
+    handle = client.get_workflow_handle(workflow_id)
+    for _ in range(150):
+        try:
+            await handle.signal(signal_name)
+            return
+        except RPCError:
+            await asyncio.sleep(0.1)
+    raise AssertionError(f"{workflow_id} never started")
+
+
+async def wait_until(check):
+    for _ in range(150):
+        if await check():
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("condition never became true")
+
+@pytest.mark.asyncio
+async def test_two_packages_delivered_then_returned():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                counting_fake_refund_payment,
+                fake_create_shipment,
+                counting_fake_restock_inventory,
+            ],
+        ):
+            order = Order(
+                order_id="TEST-011",
+                items=[OrderItem(sku="WIDGET-1", qty=2), OrderItem(sku="WIDGET-2", qty=2)],
+            )
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-011",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-011-shipment-0", "mark_delivered")
+            await signal_when_started(env.client, "test-order-TEST-011-shipment-1", "mark_delivered")
+
+            await wait_until(lambda: handle.query("is_return_window_open"))
+            await handle.signal("request_return")
+
+            result = await handle.result()
+            assert result == "RETURNED"
+            assert refund_calls == ["fake-payment-123"]
+            assert restock_calls == ["fake-reservation-123"]   
 
 @pytest.mark.asyncio
 async def test_cancel_and_confirm_race():
@@ -211,7 +288,7 @@ def reset_call_tracking():
     refund_calls.clear()
     recorded_keys.clear()
     refund_attempts.clear()
-
+    restock_calls.clear()
 @pytest.mark.asyncio
 async def test_payment_timeout_flow():
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -323,13 +400,14 @@ async def test_idempotency_key_differs_across_orders():
         async with Worker(
             env.client,
             task_queue="test-tq",
-            workflows=[OrderFulfillmentWorkflow],
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
             activities=[
                 validate_order,
                 fake_reserve_inventory_success,
                 fake_charge_payment_records_key,
                 counting_fake_release_inventory,
                 fake_refund_payment,
+                fake_create_shipment,
             ],
         ):
             order_a = Order(order_id="TEST-008", items=[OrderItem(sku="WIDGET-1", qty=1)])
@@ -350,12 +428,14 @@ async def test_idempotency_key_differs_across_orders():
 
             await handle_a.signal("payment_webhook", "CONFIRMED")
             await handle_b.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-008-shipment-0", "mark_delivered")
+            await signal_when_started(env.client, "test-order-TEST-009-shipment-0", "mark_delivered")
 
             result_a = await handle_a.result()
             result_b = await handle_b.result()
 
-            assert result_a == "PAID"
-            assert result_b == "PAID"
+            assert result_a == "COMPLETED"
+            assert result_b == "COMPLETED"
             assert len(recorded_keys) == 2
             assert len(set(recorded_keys)) == 2  
 
