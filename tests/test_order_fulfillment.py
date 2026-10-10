@@ -468,4 +468,153 @@ async def test_refund_not_found_fails_permanently():
             with pytest.raises(Exception):
                 await handle.result()
 
-            assert len(refund_attempts) == 1              
+            assert len(refund_attempts) == 1  
+
+@pytest.mark.asyncio
+async def test_one_package_lost_is_partially_lost():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                counting_fake_refund_payment,
+                fake_create_shipment,
+                counting_fake_restock_inventory,
+            ],
+        ):
+            order = Order(
+                order_id="TEST-012",
+                items=[OrderItem(sku="WIDGET-1", qty=2), OrderItem(sku="WIDGET-2", qty=2)],
+            )
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-012",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-012-shipment-0", "mark_delivered")
+            await signal_when_started(env.client, "test-order-TEST-012-shipment-1", "mark_lost")
+
+            result = await handle.result()
+            assert result == "PARTIALLY_LOST"
+            assert refund_calls == ["fake-payment-123"]
+            assert restock_calls == []    
+            
+@pytest.mark.asyncio
+async def test_all_packages_lost():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                counting_fake_refund_payment,
+                fake_create_shipment,
+                counting_fake_restock_inventory,
+            ],
+        ):
+            order = Order(
+                order_id="TEST-013",
+                items=[OrderItem(sku="WIDGET-1", qty=2), OrderItem(sku="WIDGET-2", qty=2)],
+            )
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-013",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-013-shipment-0", "mark_lost")
+            await signal_when_started(env.client, "test-order-TEST-013-shipment-1", "mark_lost")
+
+            result = await handle.result()
+            assert result == "ALL_LOST"
+            assert refund_calls == ["fake-payment-123"]
+            assert restock_calls == []                     
+
+@pytest.mark.asyncio
+async def test_all_completed():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                counting_fake_refund_payment,
+                fake_create_shipment,
+                counting_fake_restock_inventory,
+            ],
+        ):
+            order = Order(
+                order_id="TEST-014",
+                items=[OrderItem(sku="WIDGET-1", qty=2), OrderItem(sku="WIDGET-2", qty=2)],
+            )
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-014",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("payment_webhook", "CONFIRMED")
+            await signal_when_started(env.client, "test-order-TEST-014-shipment-0", "mark_delivered")
+            await signal_when_started(env.client, "test-order-TEST-014-shipment-1", "mark_delivered")
+
+            result = await handle.result()
+            assert result == "COMPLETED"
+            assert refund_calls == []
+            assert restock_calls == []     
+
+@pytest.mark.asyncio
+async def test_early_return_request_is_ignored():
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test-tq",
+            workflows=[OrderFulfillmentWorkflow, ShipmentWorkflow],
+            activities=[
+                validate_order,
+                fake_reserve_inventory_success,
+                fake_charge_payment_success,
+                fake_release_inventory,
+                counting_fake_refund_payment,
+                fake_create_shipment,
+                counting_fake_restock_inventory,
+            ],
+        ):
+            order = Order(
+                order_id="TEST-015",
+                items=[OrderItem(sku="WIDGET-1", qty=2), OrderItem(sku="WIDGET-2", qty=2)],
+            )
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id="test-order-TEST-015",
+                task_queue="test-tq",
+            )
+
+            await handle.signal("payment_webhook", "CONFIRMED")
+            await handle.signal("request_return")  # early: packages not delivered yet
+            await signal_when_started(env.client, "test-order-TEST-015-shipment-0", "mark_delivered")
+            await signal_when_started(env.client, "test-order-TEST-015-shipment-1", "mark_delivered")
+
+            result = await handle.result()
+            assert result == "COMPLETED"
+            assert refund_calls == []
+            assert restock_calls == []
