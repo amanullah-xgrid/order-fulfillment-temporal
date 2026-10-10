@@ -191,3 +191,79 @@ Every Activity is wrapped with a `@logged_activity` decorator that emits a JSON 
 
 ### Nightly reconciliation Schedule
 A Temporal Schedule (`nightly-reconciliation`, created by `setup_schedule.py`) runs `ReconciliationWorkflow` at 2am. It lists running `OrderFulfillmentWorkflow` executions, Queries each one's status and payment-wait start time, and signals `cancel_order` on any still `AWAITING_PAYMENT_CONFIRMATION` past the threshold, letting that order's own compensation logic clean it up. Pausing and manually triggering the Schedule were demonstrated directly from the Web UI's Schedules page, see `screenshots/week3/`.
+
+
+## Week 4 — Shipping, Delivery & Returns (Capstone)
+
+### What it does
+After payment is confirmed, `OrderFulfillmentWorkflow` splits the order into packages (a plain function, no Activity, capped at 2 units per package with each item kept whole) and starts one `ShipmentWorkflow` child per package. Each child creates its shipment through the mock Shipping service and then waits for a `mark_delivered` or `mark_lost` Signal, with a timeout that resolves to `LOST_IN_TRANSIT`. Children have independent lifecycles, so a lost package never blocks or fails the others, and each child's Event History stays separate from the parent's, which keeps the parent's event count low. The parent gathers the results with `return_exceptions=True` as a second layer of protection. If any package is lost, the customer is refunded and the order ends as `PARTIALLY_LOST` or `ALL_LOST`. If everything is delivered, a return window opens: a `request_return` Signal triggers a refund and then a restock and the order ends as `RETURNED`, and if the window expires the order ends as `COMPLETED`.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant Parent as OrderFulfillmentWorkflow
+    participant C0 as ShipmentWorkflow (package 0)
+    participant C1 as ShipmentWorkflow (package 1)
+    participant Ship as Shipping API
+    participant Ext as send_shipment_signal.py / send_return.py
+
+    Note over Parent: payment confirmed
+    Parent->>Parent: split_into_packages(order)
+    Parent->>C0: start_child_workflow
+    Parent->>C1: start_child_workflow
+    Note over Parent: compensations cleared (point of no return)
+    C0->>Ship: create_shipment
+    C1->>Ship: create_shipment
+    Ext->>C0: mark_delivered / mark_lost
+    Ext->>C1: mark_delivered / mark_lost
+    C0-->>Parent: DELIVERED / LOST_IN_TRANSIT
+    C1-->>Parent: DELIVERED / LOST_IN_TRANSIT
+    alt any package lost
+        Parent->>Parent: refund_payment, return ALL_LOST / PARTIALLY_LOST
+    else all delivered
+        Note over Parent: return window opens
+        alt request_return received
+            Ext->>Parent: request_return
+            Parent->>Parent: refund_payment, then restock_inventory, return RETURNED
+        else window expires
+            Parent->>Parent: return COMPLETED
+        end
+    end
+```
+
+### How to run it
+1. `temporal server start-dev`
+2. `uvicorn mock_services.inventory.main:app --reload --port 8001`
+3. `uvicorn mock_services.payment.main:app --reload --port 8002`
+4. `uvicorn mock_services.shipping.main:app --reload --port 8003`
+5. `python worker.py`
+6. `python submit_order.py --order sample_orders/order150.json`
+7. `python send_payment_webhook.py --order-id ORD-150 --status CONFIRMED`
+8. `python send_shipment_signal.py --workflow-id order-ORD-150-shipment-0 --status mark_delivered` (repeat for each package, or use `mark_lost`)
+9. `python send_return.py --order-id ORD-150` within the return window
+
+### Outcomes demonstrated
+| Scenario | Result | Refund | Restock |
+|---|---|---|---|
+| All packages delivered, no return request | COMPLETED | No | No |
+| All packages delivered, customer returns | RETURNED | Yes | Yes |
+| One of two packages lost | PARTIALLY_LOST | Yes (full) | No |
+| Every package lost | ALL_LOST | Yes (full) | No |
+| Return requested before the window opens | COMPLETED (request ignored) | No | No |
+
+See `screenshots/week4/` for the parent's Event History, the Relationships tab showing both children, a child's own history, and inventory before and after a return.
+
+### Design decisions
+- **Point of no return.** Once the first child Workflow starts, the compensation stack is cleared. After goods leave the warehouse, an exception must never refund the customer and release stock that physically shipped. Any later correction is an explicit forward step.
+- **Lost packages are refunded, never restocked.** Lost stock is not coming back to the shelf, so restocking it would let the same unit be sold twice. Returns are different: the goods come back, so they are restocked.
+- **Refund before restock on returns.** If the second step fails, the customer is already paid and only internal bookkeeping is off, which is safer than the reverse.
+- **Package splitting rule.** Items are grouped across a cap of 2 units per package and never split across boxes.
+- **Dev durations.** The package wait and the return window are 60 seconds locally, versus several days and 30 days in production.
+
+### Known limitations
+- A lost package triggers a full refund, not a proportional one, because `Order` and `OrderItem` carry no per-item pricing.
+- A `request_return` sent before the window opens is silently ignored. A Temporal Update with a validator would let the customer see an error instead.
+
+### Tests
+`tests/test_order_fulfillment.py` now has 14 tests. The Week 4 additions cover a full return, one package lost, every package lost, an order that completes with no return, and an early return request being ignored. Children are driven by sending Signals to their derived IDs, with a retrying helper so the test never signals a child that hasn't started.
