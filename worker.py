@@ -2,6 +2,7 @@ import asyncio
 import logging
 from temporalio.client import Client
 from temporalio.worker import Worker
+import os
 
 from workflows.order_fulfillment_workflow import OrderFulfillmentWorkflow
 from workflows.reconciliation_workflow import ReconciliationWorkflow
@@ -14,7 +15,7 @@ from activities.order_activities import (
 logging.basicConfig(level=logging.INFO)
 
 async def main():
-    client = await Client.connect("localhost:7233")
+    client = await Client.connect(os.getenv("TEMPORAL_HOST", "localhost:7233"))
 
     worker = Worker(
         client,

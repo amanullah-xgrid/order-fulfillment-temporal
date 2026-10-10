@@ -10,6 +10,13 @@ import logging
 from functools import wraps
 from datetime import datetime, timezone
 
+import os
+
+INVENTORY_URL = os.getenv("INVENTORY_URL", "http://localhost:8001")
+PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:8002")
+SHIPPING_URL = os.getenv("SHIPPING_URL", "http://localhost:8003")
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+
 logger = logging.getLogger(__name__)
 
 def logged_activity(fn):
@@ -121,7 +128,7 @@ async def validate_order(order: Order) -> bool:
 async def reserve_inventory(order: Order) -> ReservationResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/inventory/reserve",
+            f"{INVENTORY_URL}/inventory/reserve",
             json={
                 "order_id": order.order_id,
                 "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
@@ -139,7 +146,7 @@ async def reserve_inventory(order: Order) -> ReservationResult:
 async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8002/payments/charge",
+            f"{PAYMENT_URL}/payments/charge",
             json={
                 "order_id": order.order_id,
                 "amount": 49.99,
@@ -157,7 +164,7 @@ async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
 async def release_inventory(reservation_id: str) -> ReleaseResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/inventory/release",
+            f"{INVENTORY_URL}/inventory/release",
             json={"reservation_id": reservation_id}
         )
     data = response.json()
@@ -168,7 +175,7 @@ async def release_inventory(reservation_id: str) -> ReleaseResult:
 async def refund_payment(payment_id: str) -> RefundResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8002/payments/refund",
+            f"{PAYMENT_URL}/payments/refund",
             json={"payment_id": payment_id}
         )
     if response.status_code == 404:
@@ -182,7 +189,7 @@ async def refund_payment(payment_id: str) -> RefundResult:
 
 @activity.defn
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
-    client = await Client.connect("localhost:7233")
+    client = await Client.connect(TEMPORAL_HOST)
 
     cancelled = []
     async for wf in client.list_workflows(
@@ -212,7 +219,7 @@ async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> Reconciliation
 async def create_shipment(package: List[OrderItem], idempotency_key: str) -> ShipmentResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8003/shipping/create",
+            f"{SHIPPING_URL}/shipping/create",
             json={
                 "items": [{"sku": item.sku, "qty": item.qty} for item in package],
                 "idempotency_key": idempotency_key
@@ -228,7 +235,7 @@ async def create_shipment(package: List[OrderItem], idempotency_key: str) -> Shi
 async def restock_inventory(reservation_id: str) -> RestockResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/inventory/restock",
+            f"{INVENTORY_URL}/inventory/restock",
             json={"reservation_id": reservation_id}
         )
     if response.status_code == 404:
