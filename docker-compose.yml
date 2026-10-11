@@ -1,0 +1,40 @@
+services:
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--ui-port", "8080"]
+    ports:
+      - "7233:7233"
+      - "8080:8080"
+
+  inventory-api:
+    build: .
+    command: uvicorn mock_services.inventory.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+
+  payment-api:
+    build: .
+    command: uvicorn mock_services.payment.main:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+
+  shipping-api:
+    build: .
+    command: uvicorn mock_services.shipping.main:app --host 0.0.0.0 --port 8003
+    ports:
+      - "8003:8003"
+
+  worker:
+    build: .
+    command: python worker.py
+    depends_on:
+      - temporal
+      - inventory-api
+      - payment-api
+      - shipping-api
+    restart: on-failure
+    environment:
+      TEMPORAL_HOST: temporal:7233
+      INVENTORY_URL: http://inventory-api:8001
+      PAYMENT_URL: http://payment-api:8002
+      SHIPPING_URL: http://shipping-api:8003
