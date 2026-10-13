@@ -267,3 +267,24 @@ See `screenshots/week4/` for the parent's Event History, the Relationships tab s
 
 ### Tests
 `tests/test_order_fulfillment.py` now has 14 tests. The Week 4 additions cover a full return, one package lost, every package lost, an order that completes with no return, and an early return request being ignored. Children are driven by sending Signals to their derived IDs, with a retrying helper so the test never signals a child that hasn't started.
+
+## Running with Docker
+
+The whole stack (Temporal dev server, the three mock services, and the Worker) starts with one command:
+
+```
+docker compose up --build
+```
+
+This builds one image from the `Dockerfile` and starts five containers. Inside Compose, the services find each other by name, using the `TEMPORAL_HOST`, `INVENTORY_URL`, `PAYMENT_URL` and `SHIPPING_URL` environment variables. With no variables set, the code falls back to `localhost`, so running everything locally without Docker works as before.
+
+The Web UI is at `http://localhost:8080`. The CLI scripts (`submit_order.py`, the signal scripts, `send_return.py`) still run on your machine against the published port `7233`, so after the stack is up, use them exactly as described in the weekly sections.
+
+To stop everything: `docker compose down`.
+
+### Verified
+Tested with Docker Engine installed inside WSL2 (no Docker Desktop). A cancelled order exercised the Inventory and Payment containers, and a two-package order delivered and returned exercised Shipping and all five containers, including the Worker.
+
+### Notes
+- The Temporal container runs the dev server, so workflow history is lost when the containers are removed. That is fine for development and demos.
+- `requirements.txt` lists direct dependencies only, and `fastapi`, `uvicorn`, `temporalio` and `httpx` are unpinned, so a rebuild may pick up newer releases.
