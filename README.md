@@ -191,3 +191,6 @@ Every Activity is wrapped with a `@logged_activity` decorator that emits a JSON 
 
 ### Nightly reconciliation Schedule
 A Temporal Schedule (`nightly-reconciliation`, created by `setup_schedule.py`) runs `ReconciliationWorkflow` at 2am. It lists running `OrderFulfillmentWorkflow` executions, Queries each one's status and payment-wait start time, and signals `cancel_order` on any still `AWAITING_PAYMENT_CONFIRMATION` past the threshold, letting that order's own compensation logic clean it up. Pausing and manually triggering the Schedule were demonstrated directly from the Web UI's Schedules page, see `screenshots/week3/`.
+
+### Event cost: validate_order as a Local Activity
+`validate_order` is pure logic with no I/O, so it runs as a Local Activity inside the Workflow's own task. An order with no items now produces 6 events (3 state transitions) where it produced 11 (7 state transitions) as a normal Activity. `reserve_inventory` stays a normal Activity, because it makes a network call and needs retries that survive a Worker crash.

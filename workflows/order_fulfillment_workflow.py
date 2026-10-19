@@ -48,7 +48,7 @@ class OrderFulfillmentWorkflow:
     @workflow.run
     async def run(self, order: Order) -> str:
         try:
-            await workflow.execute_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5), retry_policy=RetryPolicy(non_retryable_error_types=["ValueError"]))
+            await workflow.execute_local_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5), retry_policy=RetryPolicy(non_retryable_error_types=["ValueError"]),)
             result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
 
             if result.status != "RESERVED":
