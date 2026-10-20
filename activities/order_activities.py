@@ -94,7 +94,7 @@ async def validate_order(order: Order) -> bool:
 async def reserve_inventory(order: Order) -> ReservationResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/inventory/reservee",
+            "http://localhost:8001/inventory/reserve",
             json={
                 "order_id": order.order_id,
                 "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
