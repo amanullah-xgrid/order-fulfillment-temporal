@@ -94,18 +94,33 @@ async def validate_order(order: Order) -> bool:
 async def reserve_inventory(order: Order) -> ReservationResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/inventory/reserve",
+            "http://localhost:8001/inventory/reservee",
             json={
                 "order_id": order.order_id,
                 "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
             }
         )
-    data = response.json()
-    return ReservationResult(
-        status=data["status"],
-        reservation_id=data["reservation_id"],
-        unavailable_skus=data["unavailable_skus"]
-    )
+
+    status = response.status_code
+    if 400 <= status < 500 and status not in (408, 429):
+        raise ApplicationError(
+            f"Inventory rejected the request ({status}), retrying cannot help",
+            non_retryable=True,
+        )
+    response.raise_for_status()  # 5xx, 408 and 429 raise a retryable error
+
+    try:
+        data = response.json()
+        return ReservationResult(
+            status=data["status"],
+            reservation_id=data["reservation_id"],
+            unavailable_skus=data["unavailable_skus"],
+        )
+    except (ValueError, KeyError) as e:
+        raise ApplicationError(
+            f"Inventory returned an unexpected response body: {e!r}",
+            non_retryable=True,
+        )
 
 @activity.defn
 @logged_activity

@@ -49,7 +49,7 @@ class OrderFulfillmentWorkflow:
     async def run(self, order: Order) -> str:
         try:
             await workflow.execute_local_activity(validate_order, order, start_to_close_timeout=timedelta(seconds=5), retry_policy=RetryPolicy(non_retryable_error_types=["ValueError"]),)
-            result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
+            result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=10), schedule_to_close_timeout=timedelta(minutes=5), retry_policy=RetryPolicy(initial_interval=timedelta(seconds=1), backoff_coefficient=2.0, maximum_interval=timedelta(seconds=30),),)
 
             if result.status != "RESERVED":
                 return "OUT_OF_STOCK"
