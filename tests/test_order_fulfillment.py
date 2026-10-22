@@ -370,7 +370,7 @@ async def test_refund_not_found_fails_permanently():
                 validate_order,
                 fake_reserve_inventory_success,
                 fake_charge_payment_success,
-                fake_release_inventory,
+                counting_fake_release_inventory,
                 fake_refund_payment_not_found,
             ],
         ):
@@ -388,4 +388,5 @@ async def test_refund_not_found_fails_permanently():
             with pytest.raises(Exception):
                 await handle.result()
 
-            assert len(refund_attempts) == 1              
+            assert len(refund_attempts) == 1
+            assert len(release_calls) == 1              

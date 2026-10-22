@@ -2,6 +2,7 @@
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from activities.order_activities import Order, validate_order, reserve_inventory, charge_payment, release_inventory, refund_payment
@@ -41,9 +42,18 @@ class OrderFulfillmentWorkflow:
         return self.payment_wait_started_at.isoformat() if self.payment_wait_started_at else None        
 
     async def _compensate(self):
-        while self.compensations:
-            fn, arg = self.compensations.pop()
-            await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
+       failed = []
+       while self.compensations:
+           fn, arg = self.compensations.pop()
+           try:
+               await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
+           except Exception as e:
+               failed.append(f"{fn.__name__}({arg}): {e}")
+       if failed:
+           raise ApplicationError(
+               "Compensation incomplete, manual follow-up needed: " + "; ".join(failed),
+               non_retryable=True,
+           )
 
     @workflow.run
     async def run(self, order: Order) -> str:
