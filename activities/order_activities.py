@@ -229,7 +229,7 @@ async def create_shipment(package: List[OrderItem], idempotency_key: str) -> Shi
                 "idempotency_key": idempotency_key
             }
         )
-    data = response.json()
+    data = check_response(response, "package_id")
     return ShipmentResult(
         package_id=data["package_id"]
     )
@@ -242,8 +242,5 @@ async def restock_inventory(reservation_id: str) -> RestockResult:
             "http://localhost:8001/inventory/restock",
             json={"reservation_id": reservation_id}
         )
-    if response.status_code == 404:
-        raise ApplicationError("Reservation not found, cannot restock", non_retryable=True)
-    response.raise_for_status()
-    data = response.json()
+    data = check_response(response, "status")
     return RestockResult(status=data["status"])
