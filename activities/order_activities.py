@@ -12,41 +12,50 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+
 def logged_activity(fn):
     @wraps(fn)
     async def wrapper(*args, **kwargs):
         info = activity.info()
         start = time.monotonic()
-        logger.info(json.dumps({
-            "order_id": info.workflow_id,
-            "activity_name": info.activity_type,
-            "attempt": info.attempt,
-            "event": "start"
-        }))
-        try:
-            result = await fn(*args, **kwargs)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.info(json.dumps({
-                "order_id": info.workflow_id,
-                "activity_name": info.activity_type,
-                "duration_ms": round(duration_ms, 1),
-                "outcome": "success"
-            }))
-            return result
-        except Exception:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.warning(json.dumps({
+        logger.info(
+            json.dumps({
                 "order_id": info.workflow_id,
                 "activity_name": info.activity_type,
                 "attempt": info.attempt,
-                "duration_ms": round(duration_ms, 1),
-                "outcome": "attempt_failed"
-            }))
+                "event": "start",
+            })
+        )
+        try:
+            result = await fn(*args, **kwargs)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                json.dumps({
+                    "order_id": info.workflow_id,
+                    "activity_name": info.activity_type,
+                    "duration_ms": round(duration_ms, 1),
+                    "outcome": "success",
+                })
+            )
+            return result
+        except Exception:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                json.dumps({
+                    "order_id": info.workflow_id,
+                    "activity_name": info.activity_type,
+                    "attempt": info.attempt,
+                    "duration_ms": round(duration_ms, 1),
+                    "outcome": "attempt_failed",
+                })
+            )
             raise
+
     return wrapper
 
-    def check_response(response, *required_keys):
-     status = response.status_code
+
+def check_response(response, *required_keys):
+    status = response.status_code
 
     if 400 <= status < 500 and status not in (408, 429):
         raise ApplicationError(
@@ -59,21 +68,27 @@ def logged_activity(fn):
         data = response.json()
     except ValueError as e:
         raise ApplicationError(f"Response was not valid JSON: {e!r}", non_retryable=True)
+        
+        if not isinstance(data, dict):
+          raise ApplicationError("Response was not a JSON object", non_retryable=True)
 
     missing = [k for k in required_keys if k not in data]
     if missing:
         raise ApplicationError(f"Response is missing fields: {missing}", non_retryable=True)
     return data
 
+
 @dataclass
 class OrderItem:
     sku: str
     qty: int
 
+
 @dataclass
 class Order:
     order_id: str
     items: List[OrderItem]
+
 
 @dataclass
 class ReservationResult:
@@ -81,31 +96,38 @@ class ReservationResult:
     reservation_id: str | None
     unavailable_skus: List[str]
 
+
 @dataclass
 class PaymentResult:
     payment_id: str
-    status: str 
+    status: str
+
 
 @dataclass
 class ReleaseResult:
-    status: str       
-@dataclass
+    status: str
 
+
+@dataclass
 class RefundResult:
     payment_id: str
     status: str
+
 
 @dataclass
 class ReconciliationResult:
     cancelled_order_ids: List[str]
 
+
 @dataclass
 class ShipmentResult:
     package_id: str
 
+
 @dataclass
 class RestockResult:
     status: str
+
 
 def split_into_packages(order, max_units_per_package: int = 2):
     packages = []
@@ -124,7 +146,8 @@ def split_into_packages(order, max_units_per_package: int = 2):
     if current_package:
         packages.append(current_package)
 
-    return packages    
+    return packages
+
 
 @activity.defn
 @logged_activity
@@ -135,7 +158,8 @@ async def validate_order(order: Order) -> bool:
         if item.qty <= 0:
             raise ValueError(f"Invalid qty for {item.sku}")
     return True
-    
+
+
 @activity.defn
 @logged_activity
 async def reserve_inventory(order: Order) -> ReservationResult:
@@ -144,8 +168,8 @@ async def reserve_inventory(order: Order) -> ReservationResult:
             "http://localhost:8001/inventory/reserve",
             json={
                 "order_id": order.order_id,
-                "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
-            }
+                "items": [{"sku": item.sku, "qty": item.qty} for item in order.items],
+            },
         )
     data = check_response(response, "status", "reservation_id", "unavailable_skus")
     return ReservationResult(
@@ -153,6 +177,7 @@ async def reserve_inventory(order: Order) -> ReservationResult:
         reservation_id=data["reservation_id"],
         unavailable_skus=data["unavailable_skus"],
     )
+
 
 @activity.defn
 @logged_activity
@@ -163,22 +188,24 @@ async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
             json={
                 "order_id": order.order_id,
                 "amount": 49.99,
-                "idempotency_key": idempotency_key
-            }
+                "idempotency_key": idempotency_key,
+            },
         )
     data = check_response(response, "payment_id", "status")
     return PaymentResult(payment_id=data["payment_id"], status=data["status"])
-    
+
+
 @activity.defn
 @logged_activity
 async def release_inventory(reservation_id: str) -> ReleaseResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://localhost:8001/inventory/release",
-            json={"reservation_id": reservation_id}
+            json={"reservation_id": reservation_id},
         )
     data = check_response(response, "status")
     return ReleaseResult(status=data["status"])
+
 
 @activity.defn
 @logged_activity
@@ -186,10 +213,11 @@ async def refund_payment(payment_id: str) -> RefundResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://localhost:8002/payments/refund",
-            json={"payment_id": payment_id}
+            json={"payment_id": payment_id},
         )
     data = check_response(response, "payment_id", "status")
     return RefundResult(payment_id=data["payment_id"], status=data["status"])
+
 
 @activity.defn
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
@@ -218,6 +246,7 @@ async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> Reconciliation
 
     return ReconciliationResult(cancelled_order_ids=cancelled)
 
+
 @activity.defn
 @logged_activity
 async def create_shipment(package: List[OrderItem], idempotency_key: str) -> ShipmentResult:
@@ -226,13 +255,12 @@ async def create_shipment(package: List[OrderItem], idempotency_key: str) -> Shi
             "http://localhost:8003/shipping/create",
             json={
                 "items": [{"sku": item.sku, "qty": item.qty} for item in package],
-                "idempotency_key": idempotency_key
-            }
+                "idempotency_key": idempotency_key,
+            },
         )
     data = check_response(response, "package_id")
-    return ShipmentResult(
-        package_id=data["package_id"]
-    )
+    return ShipmentResult(package_id=data["package_id"])
+
 
 @activity.defn
 @logged_activity
@@ -240,7 +268,7 @@ async def restock_inventory(reservation_id: str) -> RestockResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://localhost:8001/inventory/restock",
-            json={"reservation_id": reservation_id}
+            json={"reservation_id": reservation_id},
         )
     data = check_response(response, "status")
     return RestockResult(status=data["status"])
