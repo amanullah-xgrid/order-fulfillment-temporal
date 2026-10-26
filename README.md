@@ -192,6 +192,12 @@ Every Activity is wrapped with a `@logged_activity` decorator that emits a JSON 
 ### Nightly reconciliation Schedule
 A Temporal Schedule (`nightly-reconciliation`, created by `setup_schedule.py`) runs `ReconciliationWorkflow` at 2am. It lists running `OrderFulfillmentWorkflow` executions, Queries each one's status and payment-wait start time, and signals `cancel_order` on any still `AWAITING_PAYMENT_CONFIRMATION` past the threshold, letting that order's own compensation logic clean it up. Pausing and manually triggering the Schedule were demonstrated directly from the Web UI's Schedules page, see `screenshots/week3/`.
 
+### Event cost: validate_order as a Local Activity
+validate_order is pure logic with no I/O, so it runs as a Local Activity inside the Workflow's own task instead of as a normal Activity. Measured on an order with no items, before and after the change: 11 events and 7 state transitions as a normal Activity, 6 events and 3 state transitions as a Local Activity. The Activity's Scheduled, Started and Failed events, and the extra Workflow Tasks around them, are replaced by a single Local Activity marker. This was measured on the failure path only. reserve_inventory stays a normal Activity, because it makes a network call and needs retries that survive a Worker crash, which a Local Activity does not provide.
+
+### Non-retryable failures
+validate_order raises ValueError for invalid input, and refund_payment raises a non-retryable ApplicationError when the Payment service returns 404 because the payment does not exist. Retrying either one can never succeed, so both fail on the first attempt. Retries do not add Event History events, since the attempt number is stored inside the Activity's Started event. So this saves wasted attempts and the delay before the order fails, not events.
+
 
 ## Week 4 — Shipping, Delivery & Returns (Capstone)
 
@@ -267,3 +273,10 @@ See `screenshots/week4/` for the parent's Event History, the Relationships tab s
 
 ### Tests
 `tests/test_order_fulfillment.py` now has 14 tests. The Week 4 additions cover a full return, one package lost, every package lost, an order that completes with no return, and an early return request being ignored. Children are driven by sending Signals to their derived IDs, with a retrying helper so the test never signals a child that hasn't started.
+
+### Event cost: validate_order as a Local Activity
+validate_order is pure logic with no I/O, so it runs as a Local Activity inside the Workflow's own task instead of as a normal Activity. Measured on an order with no items, before and after the change: 11 events and 7 state transitions as a normal Activity, 6 events and 3 state transitions as a Local Activity. The Activity's Scheduled, Started and Failed events, and the extra Workflow Tasks around them, are replaced by a single Local Activity marker. This was measured on the failure path only. reserve_inventory stays a normal Activity, because it makes a network call and needs retries that survive a Worker crash, which a Local Activity does not provide.
+
+### Non-retryable failures
+validate_order raises ValueError for invalid input, and refund_payment raises a non-retryable ApplicationError when the Payment service returns 404 because the payment does not exist. Retrying either one can never succeed, so both fail on the first attempt. Retries do not add Event History events, since the attempt number is stored inside the Activity's Started event. So this saves wasted attempts and the delay before the order fails, not events.
+

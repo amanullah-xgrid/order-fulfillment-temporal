@@ -45,6 +45,26 @@ def logged_activity(fn):
             raise
     return wrapper
 
+    def check_response(response, *required_keys):
+     status = response.status_code
+
+    if 400 <= status < 500 and status not in (408, 429):
+        raise ApplicationError(
+            f"Request rejected ({status}), retrying cannot help",
+            non_retryable=True,
+        )
+    response.raise_for_status()  # 5xx, 408 and 429 stay retryable
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise ApplicationError(f"Response was not valid JSON: {e!r}", non_retryable=True)
+
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        raise ApplicationError(f"Response is missing fields: {missing}", non_retryable=True)
+    return data
+
 @dataclass
 class OrderItem:
     sku: str
@@ -127,11 +147,11 @@ async def reserve_inventory(order: Order) -> ReservationResult:
                 "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
             }
         )
-    data = response.json()
+    data = check_response(response, "status", "reservation_id", "unavailable_skus")
     return ReservationResult(
         status=data["status"],
         reservation_id=data["reservation_id"],
-        unavailable_skus=data["unavailable_skus"]
+        unavailable_skus=data["unavailable_skus"],
     )
 
 @activity.defn
@@ -146,11 +166,8 @@ async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
                 "idempotency_key": idempotency_key
             }
         )
-    data = response.json()
-    return PaymentResult(
-        payment_id=data["payment_id"],
-        status=data["status"]
-    )
+    data = check_response(response, "payment_id", "status")
+    return PaymentResult(payment_id=data["payment_id"], status=data["status"])
     
 @activity.defn
 @logged_activity
@@ -160,7 +177,7 @@ async def release_inventory(reservation_id: str) -> ReleaseResult:
             "http://localhost:8001/inventory/release",
             json={"reservation_id": reservation_id}
         )
-    data = response.json()
+    data = check_response(response, "status")
     return ReleaseResult(status=data["status"])
 
 @activity.defn
@@ -171,14 +188,8 @@ async def refund_payment(payment_id: str) -> RefundResult:
             "http://localhost:8002/payments/refund",
             json={"payment_id": payment_id}
         )
-    if response.status_code == 404:
-        raise ApplicationError("Payment not found, cannot refund", non_retryable=True)
-    response.raise_for_status()
-    data = response.json()
-    return RefundResult(
-        payment_id=data["payment_id"],
-        status=data["status"]
-    )
+    data = check_response(response, "payment_id", "status")
+    return RefundResult(payment_id=data["payment_id"], status=data["status"])
 
 @activity.defn
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
