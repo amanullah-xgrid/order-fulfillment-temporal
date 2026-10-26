@@ -45,8 +45,8 @@ def logged_activity(fn):
             raise
     return wrapper
 
-    def check_response(response, *required_keys):
-     status = response.status_code
+def check_response(response, *required_keys):
+    status = response.status_code
 
     if 400 <= status < 500 and status not in (408, 429):
         raise ApplicationError(
@@ -59,6 +59,9 @@ def logged_activity(fn):
         data = response.json()
     except ValueError as e:
         raise ApplicationError(f"Response was not valid JSON: {e!r}", non_retryable=True)
+
+        if not isinstance(data, dict):
+          raise ApplicationError("Response was not a JSON object", non_retryable=True)
 
     missing = [k for k in required_keys if k not in data]
     if missing:
@@ -89,8 +92,8 @@ class PaymentResult:
 @dataclass
 class ReleaseResult:
     status: str       
-@dataclass
 
+@dataclass
 class RefundResult:
     payment_id: str
     status: str
