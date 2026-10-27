@@ -1,6 +1,7 @@
 import asyncio
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 from datetime import timedelta
 
 with workflow.unsafe.imports_passed_through():
@@ -52,25 +53,45 @@ class OrderFulfillmentWorkflow:
     def get_payment_wait_started_at(self) -> str | None:
         return self.payment_wait_started_at.isoformat() if self.payment_wait_started_at else None
 
-    async def _compensate(self):
-        while self.compensations:
-            fn, arg = self.compensations.pop()
-            await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
-
     @workflow.query
     def is_return_window_open(self) -> bool:
-        return self.return_window_open        
+        return self.return_window_open
+
+    async def _compensate(self):
+        failed = []
+        while self.compensations:
+            fn, arg = self.compensations.pop()
+            try:
+                await workflow.execute_activity(fn, arg, start_to_close_timeout=timedelta(seconds=5))
+            except Exception as e:
+                reason = getattr(e, "cause", None) or e
+                failed.append(f"{fn.__name__}({arg}): {reason}")
+        if failed:
+            raise ApplicationError(
+                "Compensation incomplete, manual follow-up needed: " + "; ".join(failed),
+                non_retryable=True,
+            )
 
     @workflow.run
     async def run(self, order: Order) -> str:
         try:
-            await workflow.execute_activity(
+            await workflow.execute_local_activity(
                 validate_order,
                 order,
                 start_to_close_timeout=timedelta(seconds=5),
                 retry_policy=RetryPolicy(non_retryable_error_types=["ValueError"]),
             )
-            result = await workflow.execute_activity(reserve_inventory, order, start_to_close_timeout=timedelta(seconds=5))
+            result = await workflow.execute_activity(
+                reserve_inventory,
+                order,
+                start_to_close_timeout=timedelta(seconds=10),
+                schedule_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=1),
+                    backoff_coefficient=2.0,
+                    maximum_interval=timedelta(seconds=30),
+                ),
+            )
 
             if result.status != "RESERVED":
                 return "OUT_OF_STOCK"

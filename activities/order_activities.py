@@ -3,14 +3,13 @@ from temporalio.client import Client
 from temporalio import activity
 from dataclasses import dataclass
 from typing import List
+import os
 import httpx
 import time
 import json
 import logging
 from functools import wraps
 from datetime import datetime, timezone
-
-import os
 
 INVENTORY_URL = os.getenv("INVENTORY_URL", "http://localhost:8001")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:8002")
@@ -19,48 +18,83 @@ TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 
 logger = logging.getLogger(__name__)
 
+
 def logged_activity(fn):
     @wraps(fn)
     async def wrapper(*args, **kwargs):
         info = activity.info()
         start = time.monotonic()
-        logger.info(json.dumps({
-            "order_id": info.workflow_id,
-            "activity_name": info.activity_type,
-            "attempt": info.attempt,
-            "event": "start"
-        }))
-        try:
-            result = await fn(*args, **kwargs)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.info(json.dumps({
-                "order_id": info.workflow_id,
-                "activity_name": info.activity_type,
-                "duration_ms": round(duration_ms, 1),
-                "outcome": "success"
-            }))
-            return result
-        except Exception:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.warning(json.dumps({
+        logger.info(
+            json.dumps({
                 "order_id": info.workflow_id,
                 "activity_name": info.activity_type,
                 "attempt": info.attempt,
-                "duration_ms": round(duration_ms, 1),
-                "outcome": "attempt_failed"
-            }))
+                "event": "start",
+            })
+        )
+        try:
+            result = await fn(*args, **kwargs)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                json.dumps({
+                    "order_id": info.workflow_id,
+                    "activity_name": info.activity_type,
+                    "duration_ms": round(duration_ms, 1),
+                    "outcome": "success",
+                })
+            )
+            return result
+        except Exception:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                json.dumps({
+                    "order_id": info.workflow_id,
+                    "activity_name": info.activity_type,
+                    "attempt": info.attempt,
+                    "duration_ms": round(duration_ms, 1),
+                    "outcome": "attempt_failed",
+                })
+            )
             raise
+
     return wrapper
+
+
+def check_response(response, *required_keys):
+    status = response.status_code
+
+    if 400 <= status < 500 and status not in (408, 429):
+        raise ApplicationError(
+            f"Request rejected ({status}), retrying cannot help",
+            non_retryable=True,
+        )
+    response.raise_for_status()  # 5xx, 408 and 429 stay retryable
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise ApplicationError(f"Response was not valid JSON: {e!r}", non_retryable=True)
+
+    if not isinstance(data, dict):
+        raise ApplicationError("Response was not a JSON object", non_retryable=True)
+
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        raise ApplicationError(f"Response is missing fields: {missing}", non_retryable=True)
+    return data
+
 
 @dataclass
 class OrderItem:
     sku: str
     qty: int
 
+
 @dataclass
 class Order:
     order_id: str
     items: List[OrderItem]
+
 
 @dataclass
 class ReservationResult:
@@ -68,31 +102,38 @@ class ReservationResult:
     reservation_id: str | None
     unavailable_skus: List[str]
 
+
 @dataclass
 class PaymentResult:
     payment_id: str
-    status: str 
+    status: str
+
 
 @dataclass
 class ReleaseResult:
-    status: str       
-@dataclass
+    status: str
 
+
+@dataclass
 class RefundResult:
     payment_id: str
     status: str
+
 
 @dataclass
 class ReconciliationResult:
     cancelled_order_ids: List[str]
 
+
 @dataclass
 class ShipmentResult:
     package_id: str
 
+
 @dataclass
 class RestockResult:
     status: str
+
 
 def split_into_packages(order, max_units_per_package: int = 2):
     packages = []
@@ -111,7 +152,8 @@ def split_into_packages(order, max_units_per_package: int = 2):
     if current_package:
         packages.append(current_package)
 
-    return packages    
+    return packages
+
 
 @activity.defn
 @logged_activity
@@ -122,74 +164,70 @@ async def validate_order(order: Order) -> bool:
         if item.qty <= 0:
             raise ValueError(f"Invalid qty for {item.sku}")
     return True
-    
+
+
 @activity.defn
 @logged_activity
 async def reserve_inventory(order: Order) -> ReservationResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{INVENTORY_URL}/inventory/reserve",
+            f"{INVENTORY_URL}/inventory/reserve",  # changed
             json={
                 "order_id": order.order_id,
-                "items": [{"sku": item.sku, "qty": item.qty} for item in order.items]
-            }
+                "items": [{"sku": item.sku, "qty": item.qty} for item in order.items],
+            },
         )
-    data = response.json()
+    data = check_response(response, "status", "reservation_id", "unavailable_skus")
     return ReservationResult(
         status=data["status"],
         reservation_id=data["reservation_id"],
-        unavailable_skus=data["unavailable_skus"]
+        unavailable_skus=data["unavailable_skus"],
     )
+
 
 @activity.defn
 @logged_activity
 async def charge_payment(order: Order, idempotency_key: str) -> PaymentResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{PAYMENT_URL}/payments/charge",
+            f"{PAYMENT_URL}/payments/charge",  # changed
             json={
                 "order_id": order.order_id,
                 "amount": 49.99,
-                "idempotency_key": idempotency_key
-            }
+                "idempotency_key": idempotency_key,
+            },
         )
-    data = response.json()
-    return PaymentResult(
-        payment_id=data["payment_id"],
-        status=data["status"]
-    )
-    
+    data = check_response(response, "payment_id", "status")
+    return PaymentResult(payment_id=data["payment_id"], status=data["status"])
+
+
 @activity.defn
 @logged_activity
 async def release_inventory(reservation_id: str) -> ReleaseResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{INVENTORY_URL}/inventory/release",
-            json={"reservation_id": reservation_id}
+            f"{INVENTORY_URL}/inventory/release",  # changed
+            json={"reservation_id": reservation_id},
         )
-    data = response.json()
+    data = check_response(response, "status")
     return ReleaseResult(status=data["status"])
+
 
 @activity.defn
 @logged_activity
 async def refund_payment(payment_id: str) -> RefundResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{PAYMENT_URL}/payments/refund",
-            json={"payment_id": payment_id}
+            f"{PAYMENT_URL}/payments/refund",  # changed
+            json={"payment_id": payment_id},
         )
-    if response.status_code == 404:
-        raise ApplicationError("Payment not found, cannot refund", non_retryable=True)
-    response.raise_for_status()
-    data = response.json()
-    return RefundResult(
-        payment_id=data["payment_id"],
-        status=data["status"]
-    )
+    data = check_response(response, "payment_id", "status")
+    return RefundResult(payment_id=data["payment_id"], status=data["status"])
+
 
 @activity.defn
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
-    client = await Client.connect(TEMPORAL_HOST)
+    client = await Client.connect(TEMPORAL_HOST)  # changed
 
     cancelled = []
     async for wf in client.list_workflows(
@@ -214,32 +252,29 @@ async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> Reconciliation
 
     return ReconciliationResult(cancelled_order_ids=cancelled)
 
+
 @activity.defn
 @logged_activity
 async def create_shipment(package: List[OrderItem], idempotency_key: str) -> ShipmentResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{SHIPPING_URL}/shipping/create",
+            f"{SHIPPING_URL}/shipping/create",  # changed
             json={
                 "items": [{"sku": item.sku, "qty": item.qty} for item in package],
-                "idempotency_key": idempotency_key
-            }
+                "idempotency_key": idempotency_key,
+            },
         )
-    data = response.json()
-    return ShipmentResult(
-        package_id=data["package_id"]
-    )
+    data = check_response(response, "package_id")
+    return ShipmentResult(package_id=data["package_id"])
+
 
 @activity.defn
 @logged_activity
 async def restock_inventory(reservation_id: str) -> RestockResult:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{INVENTORY_URL}/inventory/restock",
-            json={"reservation_id": reservation_id}
+            f"{INVENTORY_URL}/inventory/restock",  # changed
+            json={"reservation_id": reservation_id},
         )
-    if response.status_code == 404:
-        raise ApplicationError("Reservation not found, cannot restock", non_retryable=True)
-    response.raise_for_status()
-    data = response.json()
+    data = check_response(response, "status")
     return RestockResult(status=data["status"])
