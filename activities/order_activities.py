@@ -68,9 +68,9 @@ def check_response(response, *required_keys):
         data = response.json()
     except ValueError as e:
         raise ApplicationError(f"Response was not valid JSON: {e!r}", non_retryable=True)
-        
+
     if not isinstance(data, dict):
-          raise ApplicationError("Response was not a JSON object", non_retryable=True)
+        raise ApplicationError("Response was not a JSON object", non_retryable=True)
 
     missing = [k for k in required_keys if k not in data]
     if missing:
