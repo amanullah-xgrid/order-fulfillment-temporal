@@ -226,6 +226,7 @@ async def refund_payment(payment_id: str) -> RefundResult:
 
 
 @activity.defn
+@logged_activity
 async def scan_and_cancel_stuck_orders(threshold_seconds: int) -> ReconciliationResult:
     client = await Client.connect(TEMPORAL_HOST)  # changed
 

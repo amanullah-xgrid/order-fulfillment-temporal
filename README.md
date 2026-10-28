@@ -198,6 +198,12 @@ validate_order is pure logic with no I/O, so it runs as a Local Activity inside 
 ### Non-retryable failures
 validate_order raises ValueError for invalid input, and refund_payment raises a non-retryable ApplicationError when the Payment service returns 404 because the payment does not exist. Retrying either one can never succeed, so both fail on the first attempt. Retries do not add Event History events, since the attempt number is stored inside the Activity's Started event. So this saves wasted attempts and the delay before the order fails, not events.
 
+### Retry budget and reply checking
+`reserve_inventory` retries with backoff (1 second, doubling, capped at 30 seconds) for up to 5 minutes in total, so a short Inventory outage is survived and a long one fails the order instead of leaving it running. This differs from the doc's 3 attempts, because the call is idempotent on `order_id` and an outage is what retries are for. Replies that retrying cannot fix (4xx other than 408 and 429, invalid JSON, a missing field) fail on the first attempt through a shared `check_response` helper, which has its own unit tests (`tests/test_check_response.py`).
+
+### Compensation
+If one undo step fails, the remaining steps still run, and the Workflow then fails with a message naming whatever was left undone, so an operator can follow up.
+
 
 ## Week 4 — Shipping, Delivery & Returns (Capstone)
 
@@ -270,6 +276,7 @@ See `screenshots/week4/` for the parent's Event History, the Relationships tab s
 ### Known limitations
 - A lost package triggers a full refund, not a proportional one, because `Order` and `OrderItem` carry no per-item pricing.
 - A `request_return` sent before the window opens is silently ignored. A Temporal Update with a validator would let the customer see an error instead.
+- A `cancel_order` signal sent after shipping has started is accepted but has no effect, because the Workflow only checks for cancellation while it waits for payment.
 
 ### Tests
 `tests/test_order_fulfillment.py` now has 14 tests. The Week 4 additions cover a full return, one package lost, every package lost, an order that completes with no return, and an early return request being ignored. Children are driven by sending Signals to their derived IDs, with a retrying helper so the test never signals a child that hasn't started.
